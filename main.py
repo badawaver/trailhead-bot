@@ -7,9 +7,9 @@ from bs4 import BeautifulSoup
 WEBHOOK_URL   = os.getenv("DISCORD_WEBHOOK_URL")   # 在 Railway 里配置
 INTERVAL_SEC  = int(os.getenv("INTERVAL_SEC", "600"))  # 可选：轮询间隔（秒），默认10分钟
 
-# ----- 你的商品清单 -----
+# ----- 商品清单 -----
 PRODUCTS = [
-    # trailhead 示例
+    # ----- trailhead -----
     {
         "site": "trailhead",
         "name": "Arc'teryx Covert Cardigan Men's",
@@ -45,13 +45,20 @@ PRODUCTS = [
         "color": "Stone Green",
         "sizes": [],
     },
-    # sports experts 示例
+    # ----- sports experts -----
     {
         "site": "sportsexperts",
         "name": "Arc'teryx Heliad 15 Backpack",
         "url": "https://www.sportsexperts.ca/en-CA/p-heliad-15-compressible-backpack/435066/435066-1",
         "color": "Black",
-        "sizes": [],  # 不需要用到 sizes
+        "sizes": [],
+    },
+    {
+        "site": "sportsexperts",
+        "name": "Arc'teryx Heliad Shoulder Bag",
+        "url": "https://www.sportsexperts.ca/en-CA/p-heliad-shoulder-bag/435067/435067-1",
+        "color": "Black",
+        "sizes": [],
     },
 ]
 
@@ -141,6 +148,7 @@ if __name__ == "__main__":
                                 msg += "❌ 无库存: " + ", ".join(out_stock)
                             all_messages.append(msg)
                             last_status_all[(name, color)] = current_status
+                        print(f"[trailhead] {name} - {color} 状态: {current_status}", flush=True)
                     else:  # 无尺码
                         available = current_status.get("__any__", False)
                         if available != last_status.get("__any__", None):
@@ -148,6 +156,7 @@ if __name__ == "__main__":
                             msg += "✅ 有库存" if available else "❌ 无库存"
                             all_messages.append(msg)
                             last_status_all[(name, color)] = current_status
+                        print(f"[trailhead] {name} - {color} 状态: {'有货' if available else '无货'}", flush=True)
 
                 elif site == "sportsexperts":
                     in_stock = check_stock_sportsexperts(url)
@@ -157,6 +166,7 @@ if __name__ == "__main__":
                         msg += "✅ 有库存" if in_stock else "❌ 无库存"
                         all_messages.append(msg)
                         last_status_all[(name, color)] = in_stock
+                    print(f"[sportsexperts] {name} - {color} 状态: {'有货' if in_stock else '无货'}", flush=True)
 
             except Exception as e:
                 print(f"请求失败 {site} {name} - {color}: {e}", flush=True)
