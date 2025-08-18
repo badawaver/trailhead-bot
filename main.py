@@ -71,6 +71,20 @@ PRODUCTS = [
         "color": "Black",
         "sizes": [],
     },
+     {
+        "site": "sportsexperts",
+        "name": "Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt",
+        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/230173-1",
+        "color": "Black",
+        "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
+    },
+         {
+        "site": "sportsexperts",
+        "name": "Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt",
+        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/668324-16",
+        "color": "Black",
+        "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
+    },
 ]
 
 # ===== 工具：HTTP =====
