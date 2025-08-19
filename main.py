@@ -11,6 +11,8 @@ WEBHOOK_URL     = os.getenv("DISCORD_WEBHOOK_URL")          # Railway 配置
 INTERVAL_SEC    = int(os.getenv("INTERVAL_SEC", "600"))     # 轮询间隔（秒）
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))   # 请求超时（秒）
 DEBUG           = os.getenv("DEBUG", "0") == "1"
+# 可选：从浏览器复制 sportsexperts.ca 的整串 Cookie 注入
+SPORTSEXPERTS_COOKIE = os.getenv("SPORTSEXPERTS_COOKIE", "").strip()
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,11 +41,66 @@ PRODUCTS = [
 _SESSION = requests.Session()
 _SESSION.headers.update(HEADERS)
 
-def http_get(url: str) -> str:
-    r = _SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    r.raise_for_status()
-    return r.text
+def _parse_cookie_string(cookie_str: str) -> dict:
+    jar = {}
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            jar[k.strip()] = v.strip()
+    return jar
 
+def _is_incapsula_block(html: str) -> bool:
+    low = (html or "").lower()
+    # 特征：NOINDEX/NOFOLLOW + /_Incapsula_Resource 或 iframe 跳转
+    return ("_incapsula_resource" in low) or ('name="robots"' in low and "noindex" in low)
+
+_sportsexperts_inited = False
+def _warmup_sportsexperts():
+    """预热同域、可选注入浏览器 Cookie，并加一些更像浏览器的头"""
+    global _sportsexperts_inited
+    if _sportsexperts_inited:
+        return
+    if SPORTSEXPERTS_COOKIE:
+        _SESSION.cookies.update(_parse_cookie_string(SPORTSEXPERTS_COOKIE))
+    _SESSION.headers.update({
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+    try:
+        resp = _SESSION.get("https://www.sportsexperts.ca/en-CA/", timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        if DEBUG and _is_incapsula_block(resp.text):
+            print("[DEBUG] SportsExperts 首页被 Incapsula 拦截（需要 Cookie 或浏览器渲染）", flush=True)
+    except Exception as e:
+        if DEBUG: print(f"[DEBUG] SportsExperts 预热失败: {e}", flush=True)
+    _sportsexperts_inited = True
+
+def http_get(url: str) -> str:
+    # 对 sportsexperts 先预热
+    if "sportsexperts.ca" in url:
+        _warmup_sportsexperts()
+    last_err = None
+    for _ in range(3):
+        try:
+            r = _SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            r.raise_for_status()
+            text = r.text
+            if "sportsexperts.ca" in url and _is_incapsula_block(text):
+                if DEBUG:
+                    print("[DEBUG] 命中 Incapsula 拦截页（返回占位 HTML）", flush=True)
+                    print("[DEBUG] 拦截页片段:", text[:300].replace("\n", " "), flush=True)
+            return text
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5)
+    if last_err:
+        raise last_err
+
+# ===== DEBUG：保存 + 打印 HTML 片段 =====
 def _debug_save_html(site: str, name: str, url: str, html: str):
     if not DEBUG:
         return
@@ -55,20 +112,8 @@ def _debug_save_html(site: str, name: str, url: str, html: str):
             f.write(f"<!-- {url} -->\n")
             f.write(html)
         print(f"[DEBUG] 已保存 HTML 快照: {path}", flush=True)
-
-        # 🚀 直接把前 1500 字符打到日志
         snippet = html[:1500].replace("\n", " ")
         print(f"[DEBUG] HTML 片段预览: {snippet}", flush=True)
-
-        # 🚀 关键字探测
-        low = html.lower()
-        if "product-add-to-cart" in low or "addlineitem" in low:
-            print("[DEBUG] 页面源码包含 'product-add-to-cart' 或 'addLineItem'", flush=True)
-        if "in-store only" in low:
-            print("[DEBUG] 页面源码包含 'In-Store Only'", flush=True)
-        if "see store availability" in low:
-            print("[DEBUG] 页面源码包含 'See store availability'", flush=True)
-
     except Exception as e:
         print(f"[DEBUG] 保存 HTML 快照失败: {e}", flush=True)
 
@@ -121,7 +166,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
 _AVAIL_NEG_PATTERNS = [
     "sold out", "out of stock", "currently unavailable",
     "not available", "online only - out of stock",
-    "in-store only", "in store only", "see store availability",  # ✅ 增强
+    "in-store only", "in store only", "see store availability",
     "rupture de stock", "épuisé", "indisponible"
 ]
 _BTN_TEXT_PATTERNS = [
@@ -162,7 +207,7 @@ def _is_element_enabled(el: element.Tag) -> bool:
     depth = 0
     while parent is not None and depth < 4:
         pstyle = (getattr(parent, "attrs", {}).get("style") or "").replace(" ", "").lower()
-        pclass = " ".join(getattr(parent, "attrs", {}).get("class", [])).lower()
+        pclass = " ".join(getattr(parent, "attrs", []).get("class", [])).lower() if isinstance(getattr(parent, "attrs", {}).get("class", []), list) else " ".join(getattr(parent, "attrs", {}).get("class", [])).lower()
         if any(s in pstyle for s in ["display:none", "visibility:hidden"]) or \
            any(s in pclass for s in ["d-none", "hidden", "visually-hidden"]):
             return False
@@ -227,12 +272,18 @@ def _has_add_to_cart(soup: BeautifulSoup) -> bool:
         print("[sportsexperts][DEBUG] 源码含 'product-add-to-cart' 或 'addLineItem'，但未命中选择器/可见规则", flush=True)
     return False
 
-# ===== Sports Experts 库存检测（带快照&更清晰日志）=====
+# ===== Sports Experts 库存检测 =====
 def check_stock_sportsexperts(url: str) -> bool:
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
+
     if DEBUG:
         _debug_save_html("sportsexperts", "page", url, html)
+
+    # 若是防护页，直接提示并返回 False（线上不可判定）
+    if _is_incapsula_block(html):
+        print("[sportsexperts] 被 Incapsula 拦截，无法获取真实页面（考虑注入 Cookie 或用浏览器渲染）", flush=True)
+        return False
 
     # 先看 Add to Cart（最可靠）
     if _has_add_to_cart(soup):
