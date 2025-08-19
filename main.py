@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import datetime as dt
 import requests
 from bs4 import BeautifulSoup, element
 
@@ -15,83 +16,47 @@ HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/123.0.0.0 Safari/537.36"),
-    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8,fr;q=0.7",
 }
 
 # ===== 商品清单 =====
 PRODUCTS = [
     # ----- trailhead -----
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Covert Cardigan Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-covert-cardigan-mens.html?id=113476423&quantity=1",
-        "color": "Cloud Heather / Void",
-        "sizes": ["S", "M", "L"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Gamma MX Hoody Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-gamma-mx-hoody-mens.html",
-        "color": "Black",
-        "sizes": ["M", "L"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Rho LT Zip Neck Top Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-rho-lt-zip-neck-top-mens.html",
-        "color": "Black",
-        "sizes": ["S", "M", "L", "XL", "XXL"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html",
-        "color": "Stone Green",
-        "sizes": [],
-    },
+    {"site":"trailhead","name":"Arc'teryx Covert Cardigan Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-covert-cardigan-mens.html?id=113476423&quantity=1","color":"Cloud Heather / Void","sizes":["S","M","L"]},
+    {"site":"trailhead","name":"Arc'teryx Gamma MX Hoody Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-gamma-mx-hoody-mens.html","color":"Black","sizes":["M","L"]},
+    {"site":"trailhead","name":"Arc'teryx Rho LT Zip Neck Top Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-rho-lt-zip-neck-top-mens.html","color":"Black","sizes":["S","M","L","XL","XXL"]},
+    {"site":"trailhead","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html","color":"Black","sizes":[]},
+    {"site":"trailhead","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html","color":"Stone Green","sizes":[]},
     # ----- sports experts -----
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.sportsexperts.ca/en-CA/p-heliad-15-compressible-backpack/435066/435066-1",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Heliad Shoulder Bag",
-        "url": "https://www.sportsexperts.ca/en-CA/p-heliad-shoulder-bag/435067/435067-1",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/",
-        "color": "Black",
-        "sizes": [],
-    },
+    {"site":"sportsexperts","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.sportsexperts.ca/en-CA/p-heliad-15-compressible-backpack/435066/435066-1","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Heliad Shoulder Bag","url":"https://www.sportsexperts.ca/en-CA/p-heliad-shoulder-bag/435067/435067-1","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt","url":"https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt","url":"https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/","color":"Black","sizes":[]},
 ]
 
-# ===== 工具：HTTP =====
+# ===== HTTP（带 Session）=====
+_SESSION = requests.Session()
+_SESSION.headers.update(HEADERS)
+
 def http_get(url: str) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    r = _SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
     r.raise_for_status()
     return r.text
+
+def _debug_save_html(site: str, name: str, url: str, html: str):
+    if not DEBUG:
+        return
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", f"{site}_{name}")
+    ts   = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = f"/tmp/{safe}_{ts}.html"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"<!-- {url} -->\n")
+            f.write(html)
+        print(f"[DEBUG] 已保存 HTML 快照: {path}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 保存 HTML 快照失败: {e}", flush=True)
 
 # ===== Discord 发送 =====
 def send_discord_message(text: str):
@@ -120,7 +85,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
 
     options = select.find_all("option")
 
-    if not sizes:
+    if not sizes:  # 无尺码，仅看颜色是否存在且未禁用
         available = any(
             (opt.get("data-color", "").strip() == color) and (not opt.has_attr("disabled"))
             for opt in options
@@ -128,6 +93,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
         if DEBUG: print(f"[trailhead] {color} -> {'有货' if available else '无货'} (无尺码)", flush=True)
         return {"__any__": available}
 
+    # 有尺码
     stock_status = {size: False for size in sizes}
     for opt in options:
         if opt.get("data-color", "").strip() == color:
@@ -141,7 +107,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
 _AVAIL_NEG_PATTERNS = [
     "sold out", "out of stock", "currently unavailable",
     "not available", "online only - out of stock",
-    "in-store only", "in store only",   # ✅ 新增
+    "in-store only", "in store only", "see store availability",  # ✅ 增强
     "rupture de stock", "épuisé", "indisponible"
 ]
 _BTN_TEXT_PATTERNS = [
@@ -164,6 +130,7 @@ def _get_label_text(el: element.Tag) -> str:
         el.get("data-add-to-cart") or "",
         el.get("data-qa") or "",
         el.get("data-oc-click") or "",
+        el.get("data-testid") or "",
     ]
     return " ".join(t for t in txts if t).strip().lower()
 
@@ -246,15 +213,19 @@ def _has_add_to_cart(soup: BeautifulSoup) -> bool:
         print("[sportsexperts][DEBUG] 源码含 'product-add-to-cart' 或 'addLineItem'，但未命中选择器/可见规则", flush=True)
     return False
 
-# ===== Sports Experts 库存检测 =====
+# ===== Sports Experts 库存检测（带快照&更清晰日志）=====
 def check_stock_sportsexperts(url: str) -> bool:
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
+    if DEBUG:
+        _debug_save_html("sportsexperts", "page", url, html)
 
+    # 先看 Add to Cart（最可靠）
     if _has_add_to_cart(soup):
         if DEBUG: print("[sportsexperts] 检出可点击的 Add to Cart => True", flush=True)
         return True
 
+    # JSON/Microdata：只把 InStock 当真
     avail = _parse_jsonld_availability(soup)
     if avail is True:
         if DEBUG: print("[sportsexperts] availability(JSON-LD)=InStock => True", flush=True)
@@ -264,7 +235,16 @@ def check_stock_sportsexperts(url: str) -> bool:
         if DEBUG: print("[sportsexperts] availability(microdata)=InStock => True", flush=True)
         return True
 
+    # 明确“仅门店/线下可购”的提示
     plain = soup.get_text(" ", strip=True).lower()
+    if "in-store only" in plain or "in store only" in plain:
+        if DEBUG: print("[sportsexperts] 检测到 In-Store Only（仅门店可买）=> False(线上)", flush=True)
+        return False
+    if "see store availability" in plain:
+        if DEBUG: print("[sportsexperts] 检测到 See store availability（门店库存查询）=> False(线上)", flush=True)
+        return False
+
+    # 其他无货文案
     if _text_has_any(plain, _AVAIL_NEG_PATTERNS):
         if DEBUG: print("[sportsexperts] 文案包含无货提示 => False", flush=True)
         return False
@@ -294,7 +274,7 @@ if __name__ == "__main__":
                     current_status = check_stock_trailhead(url, color, sizes)
                     last_status    = last_status_all.get(key, {})
 
-                    if sizes:
+                    if sizes:  # 有尺码
                         if current_status != last_status:
                             in_stock  = [s for s, ok in current_status.items() if ok]
                             out_stock = [s for s, ok in current_status.items() if not ok]
@@ -307,7 +287,7 @@ if __name__ == "__main__":
                             last_status_all[key] = current_status
                         print(f"[trailhead] {name} - {color} 状态: {current_status}", flush=True)
 
-                    else:
+                    else:      # 无尺码
                         available = bool(current_status.get("__any__", False))
                         last_available = (
                             last_status.get("__any__", None) if isinstance(last_status, dict) else None
@@ -321,7 +301,7 @@ if __name__ == "__main__":
 
                 elif site == "sportsexperts":
                     in_stock = check_stock_sportsexperts(url)
-                    last_status = last_status_all.get(key)
+                    last_status = last_status_all.get(key)  # bool 或 None
                     if in_stock != last_status:
                         msg = f"sportsexperts {name} - {color}\n"
                         msg += "✅ 有库存" if in_stock else "❌ 无库存"
