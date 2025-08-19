@@ -71,17 +71,17 @@ PRODUCTS = [
         "color": "Black",
         "sizes": [],
     },
-     {
+    {
         "site": "sportsexperts",
         "name": "Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/230173-1",
+        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/",
         "color": "Black",
         "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
     },
-         {
+    {
         "site": "sportsexperts",
         "name": "Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/668324-16",
+        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/",
         "color": "Black",
         "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
     },
@@ -147,6 +147,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
 # ===== 辅助：Sportsexperts 解析 =====
 _AVAIL_NEG_PATTERNS = [
     "sold out", "out of stock", "currently unavailable",
+    "not available", "online only - out of stock",
     "rupture de stock", "épuisé", "indisponible"  # 法语兜底
 ]
 _BTN_TEXT_PATTERNS = [
@@ -158,23 +159,44 @@ def _text_has_any(hay: str, needles: list) -> bool:
     hay = (hay or "").lower()
     return any(n in hay for n in needles)
 
-def _is_button_enabled(btn: element.Tag) -> bool:
-    # 属性禁用
-    if "disabled" in btn.attrs: return False
-    if (btn.get("aria-disabled") or "").lower() in ("true", "1"): return False
-    if (btn.get("data-available") or "").lower() in ("false", "0"): return False
-    # class 禁用/隐藏
-    classes = " ".join(btn.get("class", [])).lower()
+def _get_label_text(el: element.Tag) -> str:
+    """获取元素的可读文案，覆盖 button/a/input 的常见位置"""
+    txts = [
+        (el.get_text(" ", strip=True) or ""),
+        el.get("value") or "",
+        el.get("aria-label") or "",
+        el.get("title") or "",
+        el.get("data-action") or "",
+        el.get("data-add-to-cart") or "",
+        el.get("data-qa") or "",
+        el.get("name") or "",
+    ]
+    return " ".join(t for t in txts if t).strip().lower()
+
+def _is_element_enabled(el: element.Tag) -> bool:
+    """通用的启用/可见判断，支持 button/a/input"""
+    # 直接禁用信号
+    if "disabled" in el.attrs:
+        return False
+    if (el.get("aria-disabled") or "").lower() in ("true", "1"):
+        return False
+    if (el.get("data-available") or "").lower() in ("false", "0"):
+        return False
+
+    # class 提示禁用/隐藏
+    classes = " ".join(el.get("class", [])).lower()
     if any(s in classes for s in ["disabled", "is-disabled", "disabled-button", "soldout"]):
         return False
-    # 样式隐藏
-    style = (btn.get("style") or "").replace(" ", "").lower()
-    if any(s in style for s in ["display:none", "visibility:hidden", "pointer-events:none"]):
+
+    # style 隐藏
+    style = (el.get("style") or "").replace(" ", "").lower()
+    if any(s in style for s in ["display:none", "visibility:hidden", "pointer-events:none", "opacity:0"]):
         return False
-    # 祖先隐藏（简单检查）
-    parent = btn.parent
+
+    # 祖先容器隐藏（简化）
+    parent = el.parent
     depth = 0
-    while parent and depth < 4:
+    while parent is not None and depth < 4:
         pstyle = (getattr(parent, "attrs", {}).get("style") or "").replace(" ", "").lower()
         pclass = " ".join(getattr(parent, "attrs", {}).get("class", [])).lower()
         if any(s in pstyle for s in ["display:none", "visibility:hidden"]) or \
@@ -227,46 +249,59 @@ def _parse_microdata_availability(soup: BeautifulSoup):
             return False
     return None
 
-# ===== Sports Experts 库存检测 =====
+def _has_add_to_cart(soup: BeautifulSoup) -> bool:
+    """
+    站点有库存时，往往会渲染一个可交互的“加入购物车”控件。
+    同时检查 button / a[role=button] / input[type=submit] 以及常见 data-* 钩子。
+    """
+    candidates = soup.select(
+        "button, a[role='button'], input[type='submit'], "
+        "[data-action], [data-add-to-cart], [data-qa='add-to-cart']"
+    )
+    for el in candidates:
+        label = _get_label_text(el)
+        if any(pat in label for pat in _BTN_TEXT_PATTERNS):
+            if _is_element_enabled(el):
+                return True
+    return False
+
+# ===== Sports Experts 库存检测（整合修复版）=====
 def check_stock_sportsexperts(url: str) -> bool:
     """
     判定次序：
-      1) JSON-LD / microdata 的 availability
-      2) 可见且未禁用的“add to cart / ajouter au panier / add to bag / add to basket”按钮
-      3) 页面出现 Sold out / Out of stock 等字样 -> 无货
-      4) 其他情况保守返回 False（无货）
+      A) 页面存在可点击的“Add to Cart” => True
+      B) 结构化数据里明确 InStock => True
+      C) 页面出现 Sold out / Out of stock 等字样 => False
+      D) 其他情况保守 False
+    说明：不再把 JSON-LD/Microdata 的 OutOfStock 当作最终裁决，避免父 SKU 误导。
     """
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1) 结构化数据（最可靠）
+    # A. “加入购物车”控件可点击（最可靠）
+    if _has_add_to_cart(soup):
+        if DEBUG: print("[sportsexperts] 检出可点击的 Add to Cart => True", flush=True)
+        return True
+
+    # B. 结构化数据仅把 InStock 当真
     avail = _parse_jsonld_availability(soup)
-    if avail is None:
-        avail = _parse_microdata_availability(soup)
-    if avail is not None:
-        if DEBUG: print(f"[sportsexperts] availability(JSON/microdata) => {avail}", flush=True)
-        return bool(avail)
+    if avail is True:
+        if DEBUG: print("[sportsexperts] availability(JSON-LD)=InStock => True", flush=True)
+        return True
 
-    # 2) 严格按钮判定：必须含“add to …”文案，且可见/未禁用
-    btn_candidates = []
-    for btn in soup.find_all("button"):
-        label = (btn.get_text(" ", strip=True) or "").lower()
-        if _text_has_any(label, _BTN_TEXT_PATTERNS):
-            btn_candidates.append(btn)
+    avail2 = _parse_microdata_availability(soup)
+    if avail2 is True:
+        if DEBUG: print("[sportsexperts] availability(microdata)=InStock => True", flush=True)
+        return True
 
-    for btn in btn_candidates:
-        if _is_button_enabled(btn):
-            if DEBUG: print("[sportsexperts] 按钮存在且可点击 => True", flush=True)
-            return True
-
-    # 3) 文案兜底：常见“无货”提示
+    # C. 文案兜底：明确无货提示
     plain = soup.get_text(" ", strip=True).lower()
     if _text_has_any(plain, _AVAIL_NEG_PATTERNS):
         if DEBUG: print("[sportsexperts] 文案包含无货提示 => False", flush=True)
         return False
 
-    # 4) 保守处理：视为无货
-    if DEBUG: print("[sportsexperts] 未识别到明确有货信号 => False", flush=True)
+    # D. 未发现明确信号，保守 False
+    if DEBUG: print("[sportsexperts] 未发现明确有货信号 => False", flush=True)
     return False
 
 # ===== 主循环 =====
