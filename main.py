@@ -76,14 +76,14 @@ PRODUCTS = [
         "name": "Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt",
         "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/",
         "color": "Black",
-        "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
+        "sizes": [],
     },
     {
         "site": "sportsexperts",
         "name": "Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt",
         "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/",
         "color": "Black",
-        "sizes": [],   # 不用管尺码，任意有 Add to Cart 就算有货
+        "sizes": [],
     },
 ]
 
@@ -110,12 +110,6 @@ def send_discord_message(text: str):
 
 # ===== Trailhead 库存检测 =====
 def check_stock_trailhead(url: str, color: str, sizes: list):
-    """
-    sizes 为空：只判断该颜色是否可选（__any__）
-    返回：
-      - 有尺码：{size: bool, ...}
-      - 无尺码：{"__any__": bool}
-    """
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -126,7 +120,7 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
 
     options = select.find_all("option")
 
-    if not sizes:  # 无尺码，仅看颜色是否存在且未禁用
+    if not sizes:
         available = any(
             (opt.get("data-color", "").strip() == color) and (not opt.has_attr("disabled"))
             for opt in options
@@ -134,7 +128,6 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
         if DEBUG: print(f"[trailhead] {color} -> {'有货' if available else '无货'} (无尺码)", flush=True)
         return {"__any__": available}
 
-    # 有尺码
     stock_status = {size: False for size in sizes}
     for opt in options:
         if opt.get("data-color", "").strip() == color:
@@ -144,11 +137,12 @@ def check_stock_trailhead(url: str, color: str, sizes: list):
     if DEBUG: print(f"[trailhead] {color} 尺码状态: {stock_status}", flush=True)
     return stock_status
 
-# ===== 辅助：Sportsexperts 解析 =====
+# ===== Sports Experts 辅助函数 =====
 _AVAIL_NEG_PATTERNS = [
     "sold out", "out of stock", "currently unavailable",
     "not available", "online only - out of stock",
-    "rupture de stock", "épuisé", "indisponible"  # 法语兜底
+    "in-store only", "in store only",   # ✅ 新增
+    "rupture de stock", "épuisé", "indisponible"
 ]
 _BTN_TEXT_PATTERNS = [
     "add to cart", "ajouter au panier",
@@ -160,40 +154,29 @@ def _text_has_any(hay: str, needles: list) -> bool:
     return any(n in hay for n in needles)
 
 def _get_label_text(el: element.Tag) -> str:
-    """获取元素的可读文案，覆盖 button/a/input 的常见位置"""
     txts = [
         (el.get_text(" ", strip=True) or ""),
         el.get("value") or "",
         el.get("aria-label") or "",
         el.get("title") or "",
+        el.get("name") or "",
         el.get("data-action") or "",
         el.get("data-add-to-cart") or "",
         el.get("data-qa") or "",
-        el.get("name") or "",
+        el.get("data-oc-click") or "",
     ]
     return " ".join(t for t in txts if t).strip().lower()
 
 def _is_element_enabled(el: element.Tag) -> bool:
-    """通用的启用/可见判断，支持 button/a/input"""
-    # 直接禁用信号
-    if "disabled" in el.attrs:
-        return False
-    if (el.get("aria-disabled") or "").lower() in ("true", "1"):
-        return False
-    if (el.get("data-available") or "").lower() in ("false", "0"):
-        return False
-
-    # class 提示禁用/隐藏
+    if "disabled" in el.attrs: return False
+    if (el.get("aria-disabled") or "").lower() in ("true", "1"): return False
+    if (el.get("data-available") or "").lower() in ("false", "0"): return False
     classes = " ".join(el.get("class", [])).lower()
     if any(s in classes for s in ["disabled", "is-disabled", "disabled-button", "soldout"]):
         return False
-
-    # style 隐藏
     style = (el.get("style") or "").replace(" ", "").lower()
     if any(s in style for s in ["display:none", "visibility:hidden", "pointer-events:none", "opacity:0"]):
         return False
-
-    # 祖先容器隐藏（简化）
     parent = el.parent
     depth = 0
     while parent is not None and depth < 4:
@@ -207,7 +190,6 @@ def _is_element_enabled(el: element.Tag) -> bool:
     return True
 
 def _parse_jsonld_availability(soup: BeautifulSoup):
-    """从 JSON-LD 里读取 availability。返回 True/False/None（None 表示未识别）"""
     for tag in soup.find_all("script", type="application/ld+json"):
         raw = tag.string or tag.text or ""
         if not raw.strip():
@@ -240,7 +222,6 @@ def _parse_jsonld_availability(soup: BeautifulSoup):
     return None
 
 def _parse_microdata_availability(soup: BeautifulSoup):
-    """从 microdata/link/meta 读取 availability。返回 True/False/None"""
     for tag in soup.select('[itemprop="availability"]'):
         val = (tag.get("href") or tag.get("content") or tag.get_text()).lower()
         if "instock" in val:
@@ -250,64 +231,50 @@ def _parse_microdata_availability(soup: BeautifulSoup):
     return None
 
 def _has_add_to_cart(soup: BeautifulSoup) -> bool:
-    """
-    站点有库存时，往往会渲染一个可交互的“加入购物车”控件。
-    同时检查 button / a[role=button] / input[type=submit] 以及常见 data-* 钩子。
-    """
     candidates = soup.select(
         "button, a[role='button'], input[type='submit'], "
-        "[data-action], [data-add-to-cart], [data-qa='add-to-cart']"
+        "[data-qa*='add-to-cart' i], [data-oc-click*='addlineitem' i]"
     )
     for el in candidates:
         label = _get_label_text(el)
-        if any(pat in label for pat in _BTN_TEXT_PATTERNS):
+        if any(pat in label for pat in _BTN_TEXT_PATTERNS) or \
+           ("add-to-cart" in label) or ("addlineitem" in label):
             if _is_element_enabled(el):
                 return True
+    raw = soup.decode().lower()
+    if ("product-add-to-cart" in raw or "addlineitem" in raw) and DEBUG:
+        print("[sportsexperts][DEBUG] 源码含 'product-add-to-cart' 或 'addLineItem'，但未命中选择器/可见规则", flush=True)
     return False
 
-# ===== Sports Experts 库存检测（整合修复版）=====
+# ===== Sports Experts 库存检测 =====
 def check_stock_sportsexperts(url: str) -> bool:
-    """
-    判定次序：
-      A) 页面存在可点击的“Add to Cart” => True
-      B) 结构化数据里明确 InStock => True
-      C) 页面出现 Sold out / Out of stock 等字样 => False
-      D) 其他情况保守 False
-    说明：不再把 JSON-LD/Microdata 的 OutOfStock 当作最终裁决，避免父 SKU 误导。
-    """
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
 
-    # A. “加入购物车”控件可点击（最可靠）
     if _has_add_to_cart(soup):
         if DEBUG: print("[sportsexperts] 检出可点击的 Add to Cart => True", flush=True)
         return True
 
-    # B. 结构化数据仅把 InStock 当真
     avail = _parse_jsonld_availability(soup)
     if avail is True:
         if DEBUG: print("[sportsexperts] availability(JSON-LD)=InStock => True", flush=True)
         return True
-
     avail2 = _parse_microdata_availability(soup)
     if avail2 is True:
         if DEBUG: print("[sportsexperts] availability(microdata)=InStock => True", flush=True)
         return True
 
-    # C. 文案兜底：明确无货提示
     plain = soup.get_text(" ", strip=True).lower()
     if _text_has_any(plain, _AVAIL_NEG_PATTERNS):
         if DEBUG: print("[sportsexperts] 文案包含无货提示 => False", flush=True)
         return False
 
-    # D. 未发现明确信号，保守 False
     if DEBUG: print("[sportsexperts] 未发现明确有货信号 => False", flush=True)
     return False
 
 # ===== 主循环 =====
 if __name__ == "__main__":
     print("开始监控多个商品库存状态...", flush=True)
-    # 关键：用 (site, name, color) 作为键，避免站点之间撞键
     last_status_all = {}
 
     while True:
@@ -327,7 +294,7 @@ if __name__ == "__main__":
                     current_status = check_stock_trailhead(url, color, sizes)
                     last_status    = last_status_all.get(key, {})
 
-                    if sizes:  # 有尺码
+                    if sizes:
                         if current_status != last_status:
                             in_stock  = [s for s, ok in current_status.items() if ok]
                             out_stock = [s for s, ok in current_status.items() if not ok]
@@ -340,7 +307,7 @@ if __name__ == "__main__":
                             last_status_all[key] = current_status
                         print(f"[trailhead] {name} - {color} 状态: {current_status}", flush=True)
 
-                    else:      # 无尺码
+                    else:
                         available = bool(current_status.get("__any__", False))
                         last_available = (
                             last_status.get("__any__", None) if isinstance(last_status, dict) else None
@@ -354,7 +321,7 @@ if __name__ == "__main__":
 
                 elif site == "sportsexperts":
                     in_stock = check_stock_sportsexperts(url)
-                    last_status = last_status_all.get(key)  # bool 或 None
+                    last_status = last_status_all.get(key)
                     if in_stock != last_status:
                         msg = f"sportsexperts {name} - {color}\n"
                         msg += "✅ 有库存" if in_stock else "❌ 无库存"
