@@ -55,6 +55,20 @@ def _debug_save_html(site: str, name: str, url: str, html: str):
             f.write(f"<!-- {url} -->\n")
             f.write(html)
         print(f"[DEBUG] 已保存 HTML 快照: {path}", flush=True)
+
+        # 🚀 直接把前 1500 字符打到日志
+        snippet = html[:1500].replace("\n", " ")
+        print(f"[DEBUG] HTML 片段预览: {snippet}", flush=True)
+
+        # 🚀 关键字探测
+        low = html.lower()
+        if "product-add-to-cart" in low or "addlineitem" in low:
+            print("[DEBUG] 页面源码包含 'product-add-to-cart' 或 'addLineItem'", flush=True)
+        if "in-store only" in low:
+            print("[DEBUG] 页面源码包含 'In-Store Only'", flush=True)
+        if "see store availability" in low:
+            print("[DEBUG] 页面源码包含 'See store availability'", flush=True)
+
     except Exception as e:
         print(f"[DEBUG] 保存 HTML 快照失败: {e}", flush=True)
 
