@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import datetime as dt
 import requests
 from bs4 import BeautifulSoup, element
 
@@ -10,88 +11,100 @@ WEBHOOK_URL     = os.getenv("DISCORD_WEBHOOK_URL")          # Railway 配置
 INTERVAL_SEC    = int(os.getenv("INTERVAL_SEC", "600"))     # 轮询间隔（秒）
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))   # 请求超时（秒）
 DEBUG           = os.getenv("DEBUG", "0") == "1"
+SPORTSEXPERTS_COOKIE = os.getenv("SPORTSEXPERTS_COOKIE", "").strip()
+AGGRESSIVE_ATC_FALLBACK = os.getenv("AGGRESSIVE_ATC_FALLBACK", "0") == "1"
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/123.0.0.0 Safari/537.36"),
-    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8,fr;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
 # ===== 商品清单 =====
 PRODUCTS = [
     # ----- trailhead -----
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Covert Cardigan Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-covert-cardigan-mens.html?id=113476423&quantity=1",
-        "color": "Cloud Heather / Void",
-        "sizes": ["S", "M", "L"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Gamma MX Hoody Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-gamma-mx-hoody-mens.html",
-        "color": "Black",
-        "sizes": ["M", "L"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Rho LT Zip Neck Top Men's",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-rho-lt-zip-neck-top-mens.html",
-        "color": "Black",
-        "sizes": ["S", "M", "L", "XL", "XXL"],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "trailhead",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html",
-        "color": "Stone Green",
-        "sizes": [],
-    },
+    {"site":"trailhead","name":"Arc'teryx Covert Cardigan Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-covert-cardigan-mens.html?id=113476423&quantity=1","color":"Cloud Heather / Void","sizes":["S","M","L"]},
+    {"site":"trailhead","name":"Arc'teryx Gamma MX Hoody Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-gamma-mx-hoody-mens.html","color":"Black","sizes":["M","L"]},
+    {"site":"trailhead","name":"Arc'teryx Rho LT Zip Neck Top Men's","url":"https://www.trailheadpaddleshack.ca/arcteryx-rho-lt-zip-neck-top-mens.html","color":"Black","sizes":["S","M","L","XL","XXL"]},
+    {"site":"trailhead","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html","color":"Black","sizes":[]},
+    {"site":"trailhead","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.trailheadpaddleshack.ca/arcteryx-heliad-15-backpack.html","color":"Stone Green","sizes":[]},
     # ----- sports experts -----
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Heliad 15 Backpack",
-        "url": "https://www.sportsexperts.ca/en-CA/p-heliad-15-compressible-backpack/435066/435066-1",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Heliad Shoulder Bag",
-        "url": "https://www.sportsexperts.ca/en-CA/p-heliad-shoulder-bag/435067/435067-1",
-        "color": "Black",
-        "sizes": [],
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/",
-        "color": "Black",
-        "sizes": [],   # 不管尺码，只要能加车就算有货
-    },
-    {
-        "site": "sportsexperts",
-        "name": "Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt",
-        "url": "https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/",
-        "color": "Black",
-        "sizes": [],   # 不管尺码，只要能加车就算有货
-    },
+    {"site":"sportsexperts","name":"Arc'teryx Heliad 15 Backpack","url":"https://www.sportsexperts.ca/en-CA/p-heliad-15-compressible-backpack/435066/435066-1","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Heliad Shoulder Bag","url":"https://www.sportsexperts.ca/en-CA/p-heliad-shoulder-bag/435067/435067-1","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Rho Zip Neck Men's Baselayer Long-Sleeved Shirt","url":"https://www.sportsexperts.ca/en-CA/p-rho-zipneck-mens-baselayer-long-sleeved-shirt/230173/","color":"Black","sizes":[]},
+    {"site":"sportsexperts","name":"Arc'teryx Rho Zip Neck - Women's Baselayer Long-Sleeved Shirt","url":"https://www.sportsexperts.ca/en-CA/p-rho-zipneck-womens-baselayer-long-sleeved-shirt/668324/","color":"Black","sizes":[]},
 ]
 
-# ===== 工具：HTTP =====
+# ===== HTTP: Session + 预热 + Incapsula 检测 =====
+_SESSION = requests.Session()
+_SESSION.headers.update(HEADERS)
+
+def _parse_cookie_string(cookie_str: str) -> dict:
+    jar = {}
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            jar[k.strip()] = v.strip()
+    return jar
+
+def _is_incapsula_block(html: str) -> bool:
+    low = (html or "").lower()
+    return ("_incapsula_resource" in low) or ('name="robots"' in low and "noindex" in low)
+
+_sportsexperts_inited = False
+def _warmup_sportsexperts():
+    """预热域并注入浏览器 Cookie（可选），提升拿到真实页面的概率"""
+    global _sportsexperts_inited
+    if _sportsexperts_inited:
+        return
+    if SPORTSEXPERTS_COOKIE:
+        _SESSION.cookies.update(_parse_cookie_string(SPORTSEXPERTS_COOKIE))
+    try:
+        _SESSION.get("https://www.sportsexperts.ca/en-CA/", timeout=REQUEST_TIMEOUT, allow_redirects=True)
+    except Exception as e:
+        if DEBUG: print(f"[DEBUG] SportsExperts 预热失败: {e}", flush=True)
+    _sportsexperts_inited = True
+
+def _debug_save_html(site: str, name: str, url: str, html: str):
+    if not DEBUG:
+        return
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", f"{site}_{name}")
+    ts   = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = f"/tmp/{safe}_{ts}.html"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"<!-- {url} -->\n")
+            f.write(html)
+        print(f"[DEBUG] 已保存 HTML 快照: {path}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 保存 HTML 快照失败: {e}", flush=True)
+
 def http_get(url: str) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    return r.text
+    if "sportsexperts.ca" in url:
+        _warmup_sportsexperts()
+    delay = 0.4
+    last_err = None
+    for attempt in range(5):
+        try:
+            r = _SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            r.raise_for_status()
+            text = r.text
+            # 调试：保存快照，便于确认是否真实页面
+            if DEBUG and "sportsexperts.ca" in url:
+                _debug_save_html("sportsexperts", "page", url, text)
+                if _is_incapsula_block(text):
+                    print("[sportsexperts] 命中 Incapsula 拦截页（可注入 SPORTSEXPERTS_COOKIE，或用浏览器渲染）", flush=True)
+            return text
+        except Exception as e:
+            last_err = e
+            time.sleep(min(5.0, delay))
+            delay *= 1.8
+    if last_err:
+        raise last_err
 
 # ===== Discord 发送 =====
 def send_discord_message(text: str):
@@ -246,7 +259,6 @@ def _parse_jsonld_availability(soup: BeautifulSoup):
         except Exception:
             continue
         vals = []
-
         def scan(node):
             if isinstance(node, dict):
                 if "availability" in node:
@@ -258,7 +270,6 @@ def _parse_jsonld_availability(soup: BeautifulSoup):
             elif isinstance(node, list):
                 for it in node:
                     scan(it)
-
         scan(data)
         if vals:
             if any("instock" in v for v in vals):
@@ -301,7 +312,7 @@ def _any_size_enabled(soup: BeautifulSoup) -> bool:
     size_words = {"xs","s","m","l","xl","xxl"}
     elems = soup.select("button, a[role='button'], [data-size], [data-variant], [data-qa*='size' i]")
     for el in elems:
-        if not isinstance(el, element.Tag): 
+        if not isinstance(el, element.Tag):
             continue
         txt = (el.get_text(strip=True) or el.get("data-size") or el.get("aria-label") or "").lower()
         if txt in size_words and _is_element_enabled(el):
@@ -314,11 +325,17 @@ def check_stock_sportsexperts(url: str) -> bool:
     判定次序：
       1) JSON-LD / microdata / 内联 JSON 的 availability
       2) 可见且未禁用的“Add to cart”按钮
-      3) 页面出现 Sold out / Out of stock / In-Store Only 等字样 -> 线上无货
-      4) 其他情况保守返回 False（无货）
+      3) （可选）激进兜底：源码含 product-add-to-cart / addLineItem
+      4) 页面出现 Sold out / Out of stock / In-Store Only 等字样 -> 线上无货
+      5) 其他情况保守返回 False（无货）
     """
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
+
+    if DEBUG:
+        print("[sportsexperts][DEBUG] 页面长度:", len(html), flush=True)
+        if _is_incapsula_block(html):
+            print("[sportsexperts][DEBUG] 疑似防护页，占位 HTML。", flush=True)
 
     # 1) 结构化/内联 JSON（最稳）
     avail = _parse_jsonld_availability(soup)
@@ -338,12 +355,17 @@ def check_stock_sportsexperts(url: str) -> bool:
         if DEBUG: print("[sportsexperts] 可点击 Add to Cart => True", flush=True)
         return True
 
-    # 2.5)（可选兜底）发现可选尺码也认为“有货”
-    if _any_size_enabled(soup):
-        if DEBUG: print("[sportsexperts] 检到可选尺码 => 视为有货(True)", flush=True)
-        return True
+    # 3) 激进兜底（可配置）：源码含 add-to-cart 关键字，但选择器未命中
+    raw = html.lower()
+    if AGGRESSIVE_ATC_FALLBACK and (("product-add-to-cart" in raw) or ("addlineitem" in raw) or ("add to cart" in raw)):
+        plain = soup.get_text(" ", strip=True).lower()
+        if not any(x in plain for x in _AVAIL_NEG_PATTERNS):
+            if DEBUG: print("[sportsexperts] 兜底：源码含 add-to-cart 关键字 => True", flush=True)
+            return True
+        else:
+            if DEBUG: print("[sportsexperts] 兜底被文案否决（有无货/门店专售提示）", flush=True)
 
-    # 3) 常见“无货/仅门店”文案（线上视为无货）
+    # 4) 常见“无货/仅门店”文案（线上视为无货）
     plain = soup.get_text(" ", strip=True).lower()
     if any(x in plain for x in _AVAIL_NEG_PATTERNS):
         if DEBUG: print("[sportsexperts] 文案命中无货/门店专售 => False", flush=True)
@@ -355,7 +377,6 @@ def check_stock_sportsexperts(url: str) -> bool:
 # ===== 主循环 =====
 if __name__ == "__main__":
     print("开始监控多个商品库存状态...", flush=True)
-    # 用 (site, name, color) 作为键，避免站点之间撞键
     last_status_all = {}
 
     while True:
