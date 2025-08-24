@@ -235,6 +235,48 @@ def _scan_avail_keys(node):
             if res is not None: return res
     return None
 
+def _parse_jsonld_availability(soup: BeautifulSoup):
+    """从 JSON-LD 里读取 availability。返回 True/False/None（None 表示未识别）"""
+    for tag in soup.find_all("script", type="application/ld+json"):
+        raw = tag.string or tag.text or ""
+        if not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        vals = []
+
+        def scan(node):
+            if isinstance(node, dict):
+                if "availability" in node:
+                    vals.append(str(node["availability"]).lower())
+                if "offers" in node:
+                    scan(node["offers"])
+                for v in node.values():
+                    scan(v)
+            elif isinstance(node, list):
+                for it in node:
+                    scan(it)
+
+        scan(data)
+        if vals:
+            if any("instock" in v for v in vals):
+                return True
+            if any("outofstock" in v for v in vals):
+                return False
+    return None
+
+def _parse_microdata_availability(soup: BeautifulSoup):
+    """从 microdata/link/meta 读取 availability。返回 True/False/None"""
+    for tag in soup.select('[itemprop="availability"]'):
+        val = (tag.get("href") or tag.get("content") or tag.get_text()).lower()
+        if "instock" in val:
+            return True
+        if "outofstock" in val:
+            return False
+    return None
+
 def _parse_inline_json_availability(html: str):
     """从内联 <script> 里粗粒度提取 JSON，并扫描库存键"""
     scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, flags=re.S|re.I)
