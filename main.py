@@ -4,6 +4,7 @@ import json
 import time
 import datetime as dt
 import requests
+from requests.cookies import create_cookie   # <<< 新增：用于按域名注入 Cookie
 from bs4 import BeautifulSoup, element
 
 # ===== 环境变量 =====
@@ -13,6 +14,7 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))   # 请求超时（秒
 DEBUG           = os.getenv("DEBUG", "0") == "1"
 SPORTSEXPERTS_COOKIE = os.getenv("SPORTSEXPERTS_COOKIE", "").strip()
 AGGRESSIVE_ATC_FALLBACK = os.getenv("AGGRESSIVE_ATC_FALLBACK", "0") == "1"
+SCRAPERAPI_KEY  = os.getenv("SCRAPERAPI_KEY", "").strip()   # <<< 可选：代理渲染兜底
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,22 +53,57 @@ def _parse_cookie_string(cookie_str: str) -> dict:
             jar[k.strip()] = v.strip()
     return jar
 
+def _inject_cookie_for_domain(session: requests.Session, domain: str, cookie_str: str):
+    """把浏览器拷贝的整串 Cookie 按域名精准注入到 session"""
+    if not cookie_str.strip():
+        return
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if not k:
+                continue
+            ck = create_cookie(name=k, value=v, domain=domain, path="/")
+            session.cookies.set_cookie(ck)
+
 def _is_incapsula_block(html: str) -> bool:
     low = (html or "").lower()
     return ("_incapsula_resource" in low) or ('name="robots"' in low and "noindex" in low)
 
 _sportsexperts_inited = False
 def _warmup_sportsexperts():
-    """预热域并注入浏览器 Cookie（可选），提升拿到真实页面的概率"""
+    """预热域并注入浏览器 Cookie，尽量拿到真实页面"""
     global _sportsexperts_inited
     if _sportsexperts_inited:
         return
+
     if SPORTSEXPERTS_COOKIE:
-        _SESSION.cookies.update(_parse_cookie_string(SPORTSEXPERTS_COOKIE))
+        # 1) 精准注入到 cookiejar
+        _inject_cookie_for_domain(_SESSION, ".sportsexperts.ca", SPORTSEXPERTS_COOKIE)
+        _inject_cookie_for_domain(_SESSION, "www.sportsexperts.ca", SPORTSEXPERTS_COOKIE)
+        # 2) 同时强制作为请求头发送，确保会被带出去
+        _SESSION.headers["Cookie"] = SPORTSEXPERTS_COOKIE
+
+        if DEBUG:
+            names = [c.name for c in _SESSION.cookies if "sportsexperts.ca" in (c.domain or "")]
+            print("[DEBUG] 已注入 sportsexperts Cookie 名称：", names, flush=True)
+            print("[DEBUG] Cookie 头长度：", len(SPORTSEXPERTS_COOKIE), flush=True)
+
+    # 更像浏览器的一些头（可选）
+    _SESSION.headers.update({
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    })
+
     try:
         _SESSION.get("https://www.sportsexperts.ca/en-CA/", timeout=REQUEST_TIMEOUT, allow_redirects=True)
     except Exception as e:
         if DEBUG: print(f"[DEBUG] SportsExperts 预热失败: {e}", flush=True)
+
     _sportsexperts_inited = True
 
 def _debug_save_html(site: str, name: str, url: str, html: str):
@@ -83,6 +120,20 @@ def _debug_save_html(site: str, name: str, url: str, html: str):
     except Exception as e:
         print(f"[DEBUG] 保存 HTML 快照失败: {e}", flush=True)
 
+# 可选：命中拦截时用 ScraperAPI 渲染兜底（未配置 key 时不会触发）
+def _http_get_via_scraperapi(url: str) -> str:
+    if not SCRAPERAPI_KEY:
+        return ""
+    try:
+        api = "http://api.scraperapi.com"
+        params = {"api_key": SCRAPERAPI_KEY, "render": "true", "country_code": "ca", "url": url}
+        r = requests.get(api, params=params, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        if DEBUG: print(f"[DEBUG] ScraperAPI 调用失败: {e}", flush=True)
+        return ""
+
 def http_get(url: str) -> str:
     if "sportsexperts.ca" in url:
         _warmup_sportsexperts()
@@ -93,11 +144,19 @@ def http_get(url: str) -> str:
             r = _SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
             r.raise_for_status()
             text = r.text
-            # 调试：保存快照，便于确认是否真实页面
+
             if DEBUG and "sportsexperts.ca" in url:
                 _debug_save_html("sportsexperts", "page", url, text)
-                if _is_incapsula_block(text):
-                    print("[sportsexperts] 命中 Incapsula 拦截页（可注入 SPORTSEXPERTS_COOKIE，或用浏览器渲染）", flush=True)
+                print("[sportsexperts][DEBUG] 页面长度:", len(text), flush=True)
+
+            # 命中 Incapsula 拦截：尝试代理渲染兜底
+            if "sportsexperts.ca" in url and _is_incapsula_block(text):
+                print("[sportsexperts] 命中 Incapsula 拦截页（可注入 SPORTSEXPERTS_COOKIE，或用浏览器渲染）", flush=True)
+                alt = _http_get_via_scraperapi(url)
+                if alt:
+                    if DEBUG: print("[sportsexperts][DEBUG] 代理渲染长度:", len(alt), flush=True)
+                    return alt
+
             return text
         except Exception as e:
             last_err = e
@@ -208,7 +267,7 @@ def _is_element_enabled(el: element.Tag) -> bool:
     return True
 
 def _has_add_to_cart(soup: BeautifulSoup) -> bool:
-    # 覆盖 button / a[role=button] / input[type=submit] / data-qa / data-oc-click
+    # 覆盖 button / a[role=button] / input[type='submit'] / data-qa / data-oc-click
     candidates = soup.select(
         "button, a[role='button'], input[type='submit'], "
         "[data-qa*='add-to-cart' i], [data-qa='product-add-to-cart' i], "
@@ -353,6 +412,11 @@ def check_stock_sportsexperts(url: str) -> bool:
     # 2) 可点击的 Add to Cart
     if _has_add_to_cart(soup):
         if DEBUG: print("[sportsexperts] 可点击 Add to Cart => True", flush=True)
+        return True
+
+    # 2.5) 可选兜底：发现可选尺码也认为“有货”
+    if _any_size_enabled(soup):
+        if DEBUG: print("[sportsexperts] 检到可选尺码 => 视为有货(True)", flush=True)
         return True
 
     # 3) 激进兜底（可配置）：源码含 add-to-cart 关键字，但选择器未命中
