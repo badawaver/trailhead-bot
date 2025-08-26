@@ -82,8 +82,13 @@ def _inject_cookie_for_domain(session: requests.Session, domain: str, cookie_str
             session.cookies.set_cookie(ck)
 
 def _is_incapsula_block(html: str) -> bool:
+    """更激进的防护页识别"""
     low = (html or "").lower()
-    return ("_incapsula_resource" in low) or ('name="robots"' in low and "noindex" in low)
+    tokens = [
+        "_incapsula_resource", "incapsula", "request unsuccessful",
+        "/_/incapsula_resource?", "visid_incap", "incap_ses"
+    ]
+    return any(t in low for t in tokens)
 
 def _warmup_sportsexperts():
     """预热并注入 Cookie，提升真实页面命中率"""
@@ -192,12 +197,7 @@ def http_get(url: str) -> str:
             if DEBUG and "sportsexperts.ca" in url:
                 _debug_save_html("sportsexperts_page", url, text)
                 print("[sportsexperts][DEBUG] 页面长度:", len(text), flush=True)
-            if "sportsexperts.ca" in url and _is_incapsula_block(text):
-                print("[sportsexperts] 命中 Incapsula 拦截页", flush=True)
-                alt = _http_get_via_playwright(url)
-                if alt: return alt
-                alt2 = _http_get_via_scraperapi(url)
-                if alt2: return alt2
+            # 不在这里短路，交由解析函数决定 Unknown/True/False
             return text
         except Exception as e:
             last_err = e
@@ -273,8 +273,8 @@ def _is_element_enabled(el: element.Tag) -> bool:
         parent = parent.parent; depth += 1
     return True
 
-def _has_add_to_cart(soup: BeautifulSoup) -> bool:
-    candidates = soup.select(
+def _has_add_to_cart(soup_scope: BeautifulSoup) -> bool:
+    candidates = soup_scope.select(
         "button, a[role='button'], input[type='submit'], "
         "[data-qa*='add-to-cart' i], [data-qa='product-add-to-cart' i], "
         "[data-oc-click*='addlineitem' i]"
@@ -359,9 +359,9 @@ def _parse_inline_json_availability(html: str):
                 return found
     return None
 
-def _any_size_enabled(soup: BeautifulSoup) -> bool:
+def _any_size_enabled(soup_scope: BeautifulSoup) -> bool:
     size_words = {"xs","s","m","l","xl","xxl"}
-    elems = soup.select("button, a[role='button'], [data-size], [data-variant], [data-qa*='size' i]")
+    elems = soup_scope.select("button, a[role='button'], [data-size], [data-variant], [data-qa*='size' i]")
     for el in elems:
         if not isinstance(el, element.Tag): continue
         txt = (el.get_text(strip=True) or el.get("data-size") or el.get("aria-label") or "").lower()
@@ -369,23 +369,37 @@ def _any_size_enabled(soup: BeautifulSoup) -> bool:
             return True
     return False
 
-def check_stock_sportsexperts(url: str) -> bool:
+def check_stock_sportsexperts(url: str):
     """
-    返回：bool（线上是否有货）
+    返回：True(有货) / False(无货) / None(未知/被防护)
     判定顺序：
+      0) 命中防护页 -> Unknown
       1) JSON-LD / microdata / 内联 JSON 的 availability
-      2) 可点击的 Add to Cart
-      3) 可选尺码
+      2) 商品作用域内可点击的 Add to Cart
+      3) 商品作用域内可选尺码
       4) 激进兜底（源码含 add-to-cart 且无负面文案）
       5) “仅门店/查看门店库存” -> 受 TREAT_STORE_ONLY_AS_IN_STOCK 控制
       6) 常见无货文案
     """
     html = http_get(url)
-    soup = BeautifulSoup(html, "html.parser")
-
     if DEBUG:
         print("[sportsexperts][DEBUG] 页面长度:", len(html), flush=True)
-        if _is_incapsula_block(html): print("[sportsexperts][DEBUG] 疑似防护页", flush=True)
+
+    # 0) 命中防护页，尝试一次或两次兜底，否则 Unknown
+    if _is_incapsula_block(html):
+        if DEBUG: print("[sportsexperts][DEBUG] 疑似防护页", flush=True)
+        alt = _http_get_via_playwright(url)
+        if alt and not _is_incapsula_block(alt):
+            html = alt
+        else:
+            alt2 = _http_get_via_scraperapi(url)
+            if alt2 and not _is_incapsula_block(alt2):
+                html = alt2
+            else:
+                if DEBUG: print("[sportsexperts][DEBUG] 防护仍在，返回 Unknown", flush=True)
+                return None
+
+    soup = BeautifulSoup(html, "html.parser")
 
     # 1) 结构化/内联 JSON
     avail = _parse_jsonld_availability(soup)
@@ -398,13 +412,17 @@ def check_stock_sportsexperts(url: str) -> bool:
         if DEBUG: print("[sportsexperts] availability(JSON) => False", flush=True)
         return False
 
-    # 2) Add to Cart
-    if _has_add_to_cart(soup):
+    # 定义商品作用域（降低误检）
+    product_root = soup.select_one("form, [data-qa='product-page'], .pdp, .product-page, .product-detail")
+    scope = product_root if product_root else soup
+
+    # 2) Add to Cart（限定在商品表单容器内）
+    if _has_add_to_cart(scope):
         if DEBUG: print("[sportsexperts] 可点击 Add to Cart => True", flush=True)
         return True
 
-    # 3) 可选尺码
-    if _any_size_enabled(soup):
+    # 3) 尺码按钮（限定作用域）
+    if _any_size_enabled(scope):
         if DEBUG: print("[sportsexperts] 可选尺码 => True", flush=True)
         return True
 
@@ -420,7 +438,7 @@ def check_stock_sportsexperts(url: str) -> bool:
     plain = soup.get_text(" ", strip=True).lower()
     if _text_has_any(plain, _STORE_ONLY_PATTERNS):
         if DEBUG: print("[sportsexperts] 命中仅门店/查询门店库存", flush=True)
-        return TREAT_STORE_ONLY_AS_IN_STOCK
+        return True if TREAT_STORE_ONLY_AS_IN_STOCK else False
 
     # 6) 无货文案
     if _text_has_any(plain, _AVAIL_NEG_PATTERNS):
@@ -466,6 +484,10 @@ def main():
 
                 elif site == "sportsexperts":
                     in_stock = check_stock_sportsexperts(url)
+                    if in_stock is None:
+                        # Unknown：不更新状态，不推送
+                        print(f"[sportsexperts] {name} - {color} 状态: 未知(被防护)", flush=True)
+                        continue
                     last = last_status_all.get(key)
                     if in_stock != last:
                         msg = f"sportsexperts {name} - {color}\n" + ("✅ 有库存" if in_stock else "❌ 无库存")
